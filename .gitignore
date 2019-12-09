@@ -1,0 +1,9 @@
+.vscode
+env/
+*.pyc
+*/target/
+Cargo.lock
+**/*.rs.bk
+
+storage/
+debug/
