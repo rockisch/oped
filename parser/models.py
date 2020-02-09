@@ -1,121 +1,150 @@
 from __future__ import annotations
 
-import sqlite3
-from sqlite3 import Connection, Cursor
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
-from dataclasses import dataclass
+import enum
+from dataclasses import dataclass, InitVar
+from typing import Dict, List, Optional, Union
 
-from utils import get_conn
+
+class EntryKinds(str, enum.Enum):
+    KIND = 'k'
+    TITLE = 't'
+    NUMBER = 'n'
+    VERSION = 'v'
+    LINK = 'l'
+    ARTIST = 'a'
+    REGION = 'r'
+    META = 'm'
+
+
+class KindKinds(enum.IntEnum):
+    OP = 1
+    ED = 2
+
+
+Id = int
 
 
 @dataclass
-class Manager:
-    model: Any
-    table: str
-    rows: List[str]
+class Entry:
+    parser_data: InitVar[ParserData]
 
-    def _build_equal_where(self, keys: List[str]) -> str:
-        wheres = [f"{k}=:{k}" for k in keys]
-        return " AND ".join(wheres)
+    kind: KindKinds
+    title: str
+    link: Union[str, List[str]]
+    number: Optional[int] = None
+    version: Optional[int] = None
+    artist: Optional[Id] = None
+    region: Optional[Id] = None
+    meta: Optional[Id] = None
 
-    def _query(self, conn: Connection, **kwargs: Any) -> Cursor:
-        where = self._build_equal_where(kwargs.keys())
-        c = conn.cursor()
-        c.execute(f"SELECT {','.join(self.rows)} FROM {self.table} WHERE {where}", kwargs)
-        return c
+    def __post_init__(self, parser_data):
+        if self.artist:
+            self.artist = parser_data.get_artist_id(self.artist)
 
-    @get_conn
-    def get(self, conn: Connection, **kwargs: Any) -> Any:
-        c = self._query(conn, **kwargs)
-        row = c.fetchone()
-        return self.model(row)
+        if self.region:
+            self.region = parser_data.get_region_id(self.region)
 
-    @get_conn
-    def filter(self, conn: Connection, **kwargs: Any) -> List[Any]:
-        c = self._query(conn, **kwargs)
-        rows = c.fetchall()
-        return [self.model(row) for row in rows]
+        if self.meta:
+            self.meta = parser_data.get_meta_id(self.meta)
 
-    @get_conn
-    def save(self, conn: Connection, instance: Any):
-        sets = f"{'=?,'.join(self.rows)}=?"
-        values = [getattr(instance, r) for r in self.rows]
+    def serialize(self):
+        data = {
+            EntryKinds.KIND: self.kind,
+            EntryKinds.TITLE: self.title,
+            EntryKinds.LINK: self.link,
+        }
 
-        c = conn.cursor()
-        c.execute(f"UPDATE {self.table} SET {sets} WHERE pk=?", *values, instance.pk)
+        if self.number:
+            data[EntryKinds.NUMBER] = self.number
+        if self.artist:
+            data[EntryKinds.ARTIST] = self.artist
+        if self.region:
+            data[EntryKinds.REGION] = self.region
+        if self.meta:
+            data[EntryKinds.META] = self.meta
 
-
-class Model:
-    objects: ClassVar[Manager]
-
-    def save(self):
-        self.objects.save(self)
+        return data
 
 
-class Anime(Model):
-    objects: ClassVar[Manager]
+@dataclass
+class Anime:
+    name: str
+    season: int
+    year: int
+    entries: List[Entry]
+    mal: Optional[str] = None
+    aliases: Optional[List[str]] = None
 
-    def __init__(self, name: str, pk: int, year: int, season: int, mal: str):
-        self.pk = pk
-        self.name = name
-        self.year = year
-        self.season = season
-        self.mal = mal
+    def __post_init__(self):
+        version_entries = []
+        for entry in self.entries[:]:
+            if entry.version is not None and int(entry.version) != 1:
+                version_entries.append(entry)
+                self.entries.remove(entry)
 
-    def entries(self):
-        return Entry.objects.filter(anime_pk=self.pk)
+        for version_entry in version_entries:
+            for entry in self.entries:
+                if all(getattr(version_entry, key) == getattr(entry, key) for key in ('title', 'kind', 'number')):
+                    if isinstance(entry.link, dict):
+                        entry.link[version_entry.version] = version_entry.link
+                    else:
+                        entry.link = {
+                            entry.version or 1: entry.link,
+                            version_entry.version: version_entry.link,
+                        }
 
-
-Anime.objects = Manager(Anime, "anime", ["name", "year", "season" "mal"])
-
-
-class Alias(Model):
-    objects: ClassVar[Manager]
-
-    def __init__(self, pk: int, anime: Union[Anime, int], name: str):
-        self.pk = pk
-        self.name = name
-        if isinstance(anime, int):
-            self.anime_pk = anime
-        elif isinstance(anime, Anime):
-            self._anime = anime
-            self.anime_pk = anime.pk
-
-    @property
-    def anime(self):
-        if getattr(self, "_anime", None) is None:
-            self._anime = Anime.objects.get(pk=self.anime_pk)
-
-        return self._anime
+    def serialize(self):
+        entries = [entry.serialize() for entry in self.entries]
+        return [self.name, self.season, self.year, entries, self.mal, self.aliases]
 
 
-Alias.objects = Manager(Anime, "alias", ["anime_pk", "name"])
+class ParserData:
+    def __init__(self):
+        self.animes: Dict[Id, Anime] = {}
+        self.metas: Dict[Id, str] = {}
+        self.artists: Dict[Id, str] = {}
+        self.regions: Dict[Id, str] = {}
 
+        self._metas: Dict[str, Id] = {}
+        self._artists: Dict[str, Id] = {}
+        self._regions: Dict[str, Id] = {}
 
-class Entry(Model):
-    OP = 0
-    ED = 1
+    def get_artist_id(self, artist: str):
+        if artist in self._artists:
+            return self._artists[artist]
+        else:
+            artist_id = len(self.artists)
+            self.artists[artist_id] = artist
+            self._artists[artist] = artist_id
+            return artist_id
 
-    objects: ClassVar[Manager]
+    def get_region_id(self, region: str):
+        if region in self._regions:
+            return self._regions[region]
+        else:
+            region_id = len(self.regions)
+            self.regions[region_id] = region
+            self._regions[region] = region_id
+            return region_id
 
-    def __init__(self, pk: int, anime: Union[Anime, int], name: str, kind: int, artist: str, meta: str):
-        self.pk = pk
-        self.name = name
-        self.kind = kind
-        self.artist = artist
-        self.meta = meta
-        if isinstance(anime, int):
-            self.anime_pk = anime
-        elif isinstance(anime, Anime):
-            self._anime = anime
-            self.anime_pk = anime.pk
+    def get_meta_id(self, meta: str):
+        if meta in self._metas:
+            return self._metas[meta]
+        else:
+            meta_id = len(self.metas)
+            self.metas[meta_id] = meta
+            self._metas[meta] = meta_id
+            return meta_id
 
-    @property
-    def anime(self):
-        if getattr(self, "_anime", None) is None:
-            self._anime = Anime.objects.get(pk=self.anime_pk)
+    def add_anime(self, anime: Anime):
+        anime_id = len(self.animes)
+        self.animes[anime_id] = anime
 
-        return self._anime
-
-
-Entry.objects = Manager(Entry, "entry", ["anime_pk", "name", "kind", "artist", "meta"])
+    def serialize(self):
+        animes = {k: v.serialize() for k, v in self.animes.items()}
+        return {
+            "animes": animes,
+            "metas": self.metas,
+            "artists": self.artists,
+            "regions": self.regions,
+        }

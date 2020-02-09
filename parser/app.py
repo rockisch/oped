@@ -1,9 +1,10 @@
-import datetime
 import hashlib
 import json
 
 import reddit
+from models import ParserData
 from parse import parse_year
+
 
 auth_data = {
     "grant_type": "password",
@@ -13,49 +14,35 @@ auth_data = {
 user_agent = "windows:oped_client:0.1 (by /u/rockisch)"
 subreddit = "animethemes"
 
-data = {
-    "animes": {},
-    "aliases": {},
-    "kinds": {
-        1: "OP",
-        2: "ED",
-    },
-    "metas": {},
-    "artists": {},
-    "regions": {},
-    "__metas": {},
-    "__artists": {},
-    "__regions": {},
-}
-
 rc = reddit.Client(auth_data, user_agent)
 pages = rc.wiki_pages(subreddit)
 
-for p in pages:
+data = ParserData()
+
+for page_name in pages:
+    parser = None
     try:
-        int(p[0])
-    except:
-        print(f'INVALID PAGE {p}')
+        int(page_name[0])
+    except Exception:
+        pass
+    else:
+        parser = parse_year
+
+    if parser is None:
         continue
 
-    print(f'PARSING PAGE {p}')
-    try:
-        page = rc.wiki_page(subreddit, p)
-        entries = parse_year(page["content_md"].replace('\r', ''), data)
-    except Exception as e:
-        print(f'FAILED TO PARSE PAGE: {e}')
+    print(f'PARSING PAGE {page_name}')
+    page = rc.wiki_page(subreddit, page_name)
+    content = page["content_md"].replace('\r', '')
+    parser(content, data)
 
-for key in list(data.keys()):
-    if key.startswith('__'):
-        del data[key]
-
-data = json.dumps(data)
+json_data = json.dumps(data.serialize())
 m = hashlib.md5()
-m.update(data.encode('utf-8'))
+m.update(json_data.encode('utf-8'))
 filename = m.hexdigest()
 with open(f"storage/{filename}.json", 'w+') as f:
-    f.write(data)
+    f.write(json_data)
 
-metadata= {'most_recent': filename}
+metadata = {'most_recent': filename}
 with open('storage/metadata.json', 'w+') as f:
     f.write(json.dumps(metadata))
